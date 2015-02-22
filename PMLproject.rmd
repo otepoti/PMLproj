@@ -1,0 +1,162 @@
+---
+title: "Predicting exercise quality"
+output: html_document
+---
+```{r loadpackages, message=FALSE, echo=FALSE}
+library(randomForest)
+library(dplyr)
+library(caret)
+library(scales)
+```
+## Introduction
+
+Using data from [this site](http://groupware.les.inf.puc-rio.br/har) I constructed a predictor using random forests to classify  sets of mechanical measurement recorded during a weightlifting session into previously defined categories of the "quality" with which the exercise was done.
+
+The model was tested using a test set of 20 records and the predictions uploaded to Coursera for evaluation. The predictions were 100% correct according to Coursera.
+
+
+## Data and pre-processing
+
+Some information about the variables was given [here](http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201), but it was difficult to match up to the actual data file and was not used. Instead I:
+
+1. Removed the first 7 columns that contained identification data and other information not relevent to the model;
+2. Removed variables that were largely blank or NA;
+3. removed variables identified by the `nearZeroVar()` function from the `caret` package.
+
+The data pre-processing code is:
+
+```{r preprocessing, cache=FALSE}
+setInternet2(use = TRUE)
+training <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+startVars <- dim(training)[2]
+removeCols <- 1:7
+for (i in 1:ncol(training)){
+  propNA <- sum(is.na(training[,i]))/nrow(training)
+  if (propNA > 0.5) removeCols <- c(removeCols, i)
+}
+removeCols <- c(removeCols, nearZeroVar(training))
+removeCols <- unique(removeCols)
+training <- training[-removeCols]
+cleanedVars <- dim(training)[2]
+```
+
+The training data consists of `r nrow(training)` observations. The initial data conisted of `r startVars` variables. This was reduced to `r cleanedVars` variables by the pre-processing.
+
+##Modelling
+
+With the clean data I fitted a random forests model and extracted the OOB (out of bag) error rate.
+
+```{r fitMainModel, cache=TRUE, message=FALSE}
+set.seed(0220)
+modfit <- randomForest(classe~ .,data=training, importance=TRUE)
+modfit$err.rate[modfit$ntree,1]
+```
+
+Since the predicted out of sample error rate was very low (`r percent(modfit$err.rate[modfit$ntree,1])`) I went ahead and predicted the results for the test sample.
+
+```{r prediction}
+testing <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+answers <- predict(modfit, testing)
+answers
+```
+These answers were submitted and found to be 100% correct.
+
+##Model assessment
+
+The OOB error rate obtained from the random forests package is a good estimate of the predicted out of sample error rate and is calculated in a way that makes separate cross validation largely irrelevant. However, for interest, I ran another random forest model with a smaller number of trees and a fewer variables and compare the OOB error rate with a figure derived from a 10-fold cross validation.
+
+To select a smaller model I looked at the plots of the importance of the variables and the decrease in OOB with the number of trees. These graphs are shown in the appendix. It can be seen that the gain in accuracy achieved by increasing the number of trees above 50 is very small, so this was chosen as a reasonable number. 
+
+To chose the variables, I selected those which featured in the top 20 of both of the importance measures. This gave 13 variables. There is no formal justification of this technique (and the set of variables chosen will vary randomly with each run of the main model), but it seems reasonable for our purposes.
+
+```{r slimModel, echo=FALSE}
+# Get the accuracy importance scores.
+imp1 <- importance(modfit, type=1) 
+# Convert to a vector of variable names in decreasing order of importance
+impdf1 <- data.frame("feature"=rownames(imp1), 
+                    "AccDec"=imp1[,1], row.names=NULL)
+impdf1 <- arrange(impdf1, desc(AccDec))
+# Do the same of Gini factor scores.
+imp2 <- importance(modfit, type=2)
+impdf2 <- data.frame("feature"=rownames(imp2), 
+                     "ImpurDec"=imp2[,1], row.names=NULL)
+impdf2 <- arrange(impdf2, desc(ImpurDec))
+# Select the variables that appear in the top npool of both groups.
+npool <- 20
+feats <- intersect(impdf1[1:npool,1], impdf2[1:npool,1])
+# Create a new data frame of the slimmed down training data
+trainslim <- select(training, 
+                    c(which(names(training) %in% feats), 
+                      ncol(training)))
+```
+
+                    
+Having produced a slimmed down training set, the random forest was rerun with 50 trees.
+
+```{r}
+modfit2 <- randomForest(classe~ .,data=trainslim, ntree=50)
+predict(modfit2, testing)
+modfit2$err.rate[modfit2$ntree,1]
+```
+
+It turns out that the OOB is higer than before, but still small in absolute terms, and the predictions from the test set are exactly the same.
+
+Finally, I performed a 10-fold cross validation, with three repetitions of each fold, and calculated the average accuracy of predictions of the test fold.
+
+```{r crossVal, cache=TRUE}
+
+folds <- createFolds(y=trainslim$classe,k=10,
+                     list=TRUE,returnTrain=TRUE)
+acc <- numeric(0)
+for (i in 1:10){
+  fld=folds[[i]]
+  for (j in 1:3){
+    mfit <- randomForest(classe~ .,data=trainslim[fld,], ntree=50)
+    pred <- predict(mfit, trainslim[-fld,])
+    cm <- confusionMatrix(pred, trainslim[-fld,]$classe )
+    acc <- c(acc,1-cm$overall[1])
+  }
+}
+```
+
+The estimated out of sample accuracy was `r percent(mean(acc))` - very close to the OOB figure previously obtained.
+
+##Appendix A
+
+###Accuracy plot
+```{r fig.width=8, fig.height=6}
+plot(modfit, main="Change in accuracy with number of trees")
+abline(v=50, lty=2, col="blue")
+```
+
+###Importance plots
+```{r fig.width=10, fig.height=6}
+varImpPlot(modfit, main="Importance of features")
+```
+
+##Appendix B
+
+Code for selection of slimmed data set and cross validation.
+
+
+```{r slimModelCode, eval=FALSE}
+# Get the accuracy importance scores.
+imp1 <- importance(modfit, type=1) 
+# Convert to a vector of variable names in decreasing order of importance
+impdf1 <- data.frame("feature"=rownames(imp1), 
+                    "AccDec"=imp1[,1], row.names=NULL)
+impdf1 <- arrange(impdf1, desc(AccDec))
+# Do the same of Gini factor scores.
+imp2 <- importance(modfit, type=2)
+impdf2 <- data.frame("feature"=rownames(imp2), 
+                     "ImpurDec"=imp2[,1], row.names=NULL)
+impdf2 <- arrange(impdf2, desc(ImpurDec))
+# Select the variables that appear in the top npool of both groups.
+npool <- 20
+feats <- intersect(impdf1[1:npool,1], impdf2[1:npool,1])
+# Create a new data frame of the slimmed down training data
+trainslim <- select(training, 
+                    c(which(names(training) %in% feats), 
+                      ncol(training)))
+```
+
